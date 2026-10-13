@@ -1,0 +1,11 @@
+[project]
+name = "automate-dataentry"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "jupyterlab>=4.6.4",
+    "matplotlib>=3.11.2",
+    "pandas>=3.0.6",
+    "selenium>=4.51.0",
+    "pyside6>=6.8,<6.12",
+]
