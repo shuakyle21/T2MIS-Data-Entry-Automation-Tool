@@ -16,3 +16,4 @@ build/
 data/registrants.csv
 data/*.csv
 !data/registrants.sample.csv
+!data/enrollees.sample.csv
