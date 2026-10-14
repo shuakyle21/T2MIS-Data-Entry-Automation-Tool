@@ -1,11 +1,14 @@
 """Main window: upload masterlist, preview sample data, run controls, log."""
 
+from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
+    QDateEdit,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -20,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.services import csv_loader
+from app.services import attendance, csv_loader
 from app.services.automation import DEFAULT_SCHED_ID
 from app.services.csv_loader import (
     is_done,
@@ -36,6 +39,10 @@ from app.workers.selenium_worker import SeleniumWorker
 STATUS_COL = "Status"
 STAGE_ENCODE = "Stage 1 — Encoding"
 STAGE_ENROLL = "Stage 2 — Enrollment"
+STAGE_ATTEND = "Stage 3 — Attendance"
+
+ATTEND_TEMPLATE = Path.cwd() / "ATTENDANCE SHEET (template).docx"
+WEEKDAY_LABELS = ["M", "T", "W", "Th", "F", "Sat", "Sun"]
 
 COLOR_PENDING = QColor("#ffffff")
 COLOR_FILLING = QColor("#cfe2ff")
@@ -69,7 +76,7 @@ class MainWindow(QMainWindow):
         # --- file row ---
         file_row = QHBoxLayout()
         self.stage_box = QComboBox()
-        self.stage_box.addItems([STAGE_ENCODE, STAGE_ENROLL])
+        self.stage_box.addItems([STAGE_ENCODE, STAGE_ENROLL, STAGE_ATTEND])
         self.stage_box.currentTextChanged.connect(self.on_stage_changed)
         file_row.addWidget(self.stage_box)
         self.sched_edit = QLineEdit(DEFAULT_SCHED_ID)
@@ -123,6 +130,55 @@ class MainWindow(QMainWindow):
         self.current_label = QLabel("Idle.")
         layout.addWidget(self.current_label)
 
+        # --- attendance panel (Stage 3, offline batch generation) ---
+        self.attend_panel = QWidget()
+        attend = QVBoxLayout(self.attend_panel)
+        attend.setContentsMargins(0, 0, 0, 0)
+        type_row = QHBoxLayout()
+        type_row.addWidget(QLabel("School:"))
+        self.school_edit = QLineEdit()
+        self.school_edit.setPlaceholderText("Type school name — fills {INSERT SCHOOL}")
+        self.school_edit.textChanged.connect(lambda _t: self._update_attendance_preview())
+        type_row.addWidget(self.school_edit, 1)
+        type_row.addWidget(QLabel("Program:"))
+        self.program_edit = QLineEdit()
+        self.program_edit.setPlaceholderText("Type program — fills {INSERT PROGRAM}")
+        self.program_edit.textChanged.connect(lambda _t: self._update_attendance_preview())
+        type_row.addWidget(self.program_edit, 1)
+        attend.addLayout(type_row)
+        date_row = QHBoxLayout()
+        today = QDate.currentDate()
+        date_row.addWidget(QLabel("Start:"))
+        self.start_date = QDateEdit(today)
+        self.start_date.setCalendarPopup(True)
+        self.start_date.setDisplayFormat("MMM d, yyyy")
+        self.start_date.dateChanged.connect(lambda _d: self._update_attendance_preview())
+        date_row.addWidget(self.start_date)
+        date_row.addWidget(QLabel("End:"))
+        self.end_date = QDateEdit(today)
+        self.end_date.setCalendarPopup(True)
+        self.end_date.setDisplayFormat("MMM d, yyyy")
+        self.end_date.dateChanged.connect(lambda _d: self._update_attendance_preview())
+        date_row.addWidget(self.end_date)
+        self.day_checks = []
+        for label in WEEKDAY_LABELS:
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            cb.stateChanged.connect(lambda _s: self._update_attendance_preview())
+            self.day_checks.append(cb)
+            date_row.addWidget(cb)
+        date_row.addStretch(1)
+        attend.addLayout(date_row)
+        prev_row = QHBoxLayout()
+        self.attend_preview = QLabel("No file loaded.")
+        prev_row.addWidget(self.attend_preview, 1)
+        self.generate_btn = QPushButton("Generate Attendance DOCX")
+        self.generate_btn.clicked.connect(self.on_generate_attendance)
+        prev_row.addWidget(self.generate_btn)
+        attend.addLayout(prev_row)
+        layout.addWidget(self.attend_panel)
+        self.attend_panel.setVisible(False)
+
         # --- log ---
         layout.addWidget(QLabel("Log:"))
         self.log_view = QTextEdit()
@@ -136,15 +192,24 @@ class MainWindow(QMainWindow):
     def _is_enroll(self):
         return self.stage_box.currentText() == STAGE_ENROLL
 
+    def _is_attendance(self):
+        return self.stage_box.currentText() == STAGE_ATTEND
+
     def _flag_done(self, row):
+        if self._is_attendance():
+            return False
         return is_enrolled(row) if self._is_enroll() else is_done(row)
 
     def on_stage_changed(self, _text):
         is_enroll = self._is_enroll()
-        self.sched_edit.setEnabled(is_enroll)
-        self.open_btn.setText(
-            "Open Enrollees CSV" if is_enroll else "Open Masterlist CSV"
-        )
+        is_attend = self._is_attendance()
+        self.sched_edit.setEnabled(is_enroll and not is_attend)
+        if is_attend:
+            self.open_btn.setText("Open Enrollees CSV")
+        else:
+            self.open_btn.setText(
+                "Open Enrollees CSV" if is_enroll else "Open Masterlist CSV"
+            )
         self.next_btn.setText(
             "Next (mark enrolled)" if is_enroll else "Next (mark done)"
         )
@@ -156,6 +221,8 @@ class MainWindow(QMainWindow):
         self._model.clear()
         self.file_label.setText("No file loaded.")
         self.count_label.setText("")
+        self.attend_panel.setVisible(is_attend)
+        self._update_attendance_preview()
         self._refresh_buttons()
 
     def open_csv(self):
@@ -170,6 +237,12 @@ class MainWindow(QMainWindow):
         try:
             if self._is_enroll():
                 fieldnames, rows, _preview = csv_loader.load_enrollees(path)
+            elif self._is_attendance():
+                try:
+                    fieldnames, rows, _preview = csv_loader.load_enrollees(path)
+                except ValueError:
+                    # Attendance only needs names; accept plain masterlists too.
+                    fieldnames, rows, _preview = csv_loader.load_csv(path)
             else:
                 fieldnames, rows, _preview = csv_loader.load_csv(path)
         except Exception as e:
@@ -183,6 +256,7 @@ class MainWindow(QMainWindow):
         self.file_label.setText(path)
         self._update_counts()
         self.log(f"Loaded {len(rows)} rows from {path}.")
+        self._update_attendance_preview()
         self._refresh_buttons()
 
     def _populate_preview(self):
@@ -444,15 +518,100 @@ class MainWindow(QMainWindow):
             and self._awaiting_phase == "search"
             and self._awaiting_ready
         )
+        is_attend = self._is_attendance()
         self.stage_box.setEnabled(not running)
-        self.sched_edit.setEnabled(not running and self._is_enroll())
+        self.sched_edit.setEnabled(not running and self._is_enroll() and not is_attend)
         self.open_btn.setEnabled(not running)
-        self.start_btn.setEnabled(not running and has_pending)
-        self.next_btn.setEnabled(bool(awaiting and self._awaiting_ok))
+        self.start_btn.setEnabled(not running and has_pending and not is_attend)
+        self.next_btn.setEnabled(bool(awaiting and self._awaiting_ok and not is_attend))
         self.fill_btn.setEnabled(bool(can_fill))
-        self.retry_btn.setEnabled(bool(awaiting))
-        self.skip_btn.setEnabled(bool(awaiting))
+        self.retry_btn.setEnabled(bool(awaiting and not is_attend))
+        self.skip_btn.setEnabled(bool(awaiting and not is_attend))
         self.stop_btn.setEnabled(running)
+        if is_attend:
+            self._update_attendance_preview()
+
+    # ---------- attendance (Stage 3) ----------
+    def _attendance_weekdays(self):
+        return {i for i, cb in enumerate(self.day_checks) if cb.isChecked()}
+
+    def _attendance_dates(self):
+        s = self.start_date.date()
+        e = self.end_date.date()
+        start = date(s.year(), s.month(), s.day())
+        end = date(e.year(), e.month(), e.day())
+        return attendance.expand_dates(start, end, self._attendance_weekdays())
+
+    def _update_attendance_preview(self):
+        if not hasattr(self, "attend_preview"):
+            return
+        if not self._is_attendance():
+            return
+        names = attendance.names_from_rows(self._rows) if self._rows else []
+        dates = self._attendance_dates()
+        _days, hours, sheets = attendance.preview_counts(len(names), len(dates))
+        if not self._rows:
+            self.attend_preview.setText("Open an enrollees CSV to list students.")
+        elif not dates:
+            self.attend_preview.setText(
+                f"{len(names)} students · 0 days — pick a range with a weekday checked."
+            )
+        else:
+            first = attendance.format_date(dates[0])
+            last = attendance.format_date(dates[-1])
+            span = first if len(dates) == 1 else f"{first} – {last}"
+            self.attend_preview.setText(
+                f"{len(names)} students · {len(dates)} days ({span}) · "
+                f"{hours} hours · {sheets} sheet(s) @ 8 hrs/day"
+            )
+        self.generate_btn.setEnabled(bool(names and dates))
+
+    def on_generate_attendance(self):
+        names = attendance.names_from_rows(self._rows)
+        if not names:
+            QMessageBox.information(self, "No file", "Open an enrollees CSV first.")
+            return
+        dates = self._attendance_dates()
+        if not dates:
+            QMessageBox.information(
+                self, "No dates", "Pick a start/end range with at least one weekday checked."
+            )
+            return
+        if not ATTEND_TEMPLATE.exists():
+            QMessageBox.critical(
+                self, "Template missing", f"Template not found:\n{ATTEND_TEMPLATE}"
+            )
+            return
+        _days, hours, sheets = attendance.preview_counts(len(names), len(dates))
+        s = self.start_date.date()
+        e = self.end_date.date()
+        default = str(
+            Path.cwd()
+            / f"attendance_{s.toString('yyyyMMdd')}-{e.toString('yyyyMMdd')}.docx"
+        )
+        out, _ = QFileDialog.getSaveFileName(
+            self, "Save Attendance DOCX", default, "Word files (*.docx)"
+        )
+        if not out:
+            return
+        try:
+            n_sheets, total_hours = attendance.generate_attendance(
+                ATTEND_TEMPLATE,
+                names,
+                self.school_edit.text(),
+                self.program_edit.text(),
+                dates,
+                out,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Generate failed", str(exc))
+            return
+        self.log(f"Wrote {n_sheets} sheet(s) ({total_hours} hrs) → {out}")
+        QMessageBox.information(
+            self,
+            "Done",
+            f"Wrote {n_sheets} sheet(s) ({total_hours} hours) across {len(dates)} day(s).\n{out}",
+        )
 
     def closeEvent(self, event):
         if self._running():

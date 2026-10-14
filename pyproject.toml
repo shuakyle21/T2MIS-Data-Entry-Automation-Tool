@@ -6,6 +6,7 @@ dependencies = [
     "jupyterlab>=4.6.4",
     "matplotlib>=3.11.2",
     "pandas>=3.0.6",
+    "python-docx>=1.1.2",
     "selenium>=4.51.0",
     "pyside6>=6.8,<6.12",
 ]
