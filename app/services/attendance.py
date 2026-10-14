@@ -88,7 +88,7 @@ def _replace_in_paragraph(para, old, new):
     return True
 
 
-def _fill_page(paragraphs, table, names_chunk, school, program, date_str, cont=False):
+def _fill_page(paragraphs, table, names_chunk, school, program, date_str, cont=False, start_no=1):
     """Fill one copied page: placeholders + student rows."""
     label_school = school.strip() or "________________________"
     label_program = program.strip() or "________________________"
@@ -105,7 +105,7 @@ def _fill_page(paragraphs, table, names_chunk, school, program, date_str, cont=F
         row = table.rows[2 + i]
         if i < len(names_chunk):
             n = names_chunk[i]
-            row.cells[0].text = str(i + 1)
+            row.cells[0].text = str(start_no + i)
             row.cells[1].text = n["last"]
             row.cells[2].text = n["first"]
             row.cells[3].text = n["mi"]
@@ -155,8 +155,9 @@ def generate_attendance(template_path, names, school, program, dates, out_path):
     for d in dates:
         date_str = format_date(d)
         for ci, chunk in enumerate(chunks):
+            start_no = ci * CAPACITY + 1
             if first:
-                _fill_page(base_paras, base_table, chunk, school, program, date_str, cont=ci > 0)
+                _fill_page(base_paras, base_table, chunk, school, program, date_str, cont=ci > 0, start_no=start_no)
                 first = False
             else:
                 # Page break, then deep-copy every template body element.
@@ -168,7 +169,7 @@ def generate_attendance(template_path, names, school, program, dates, out_path):
                     base.element.body.append(copy.deepcopy(child))
                 new_paras = base.paragraphs[new_paras_start:]
                 new_table = base.tables[-1]
-                _fill_page(new_paras, new_table, chunk, school, program, date_str, cont=ci > 0)
+                _fill_page(new_paras, new_table, chunk, school, program, date_str, cont=ci > 0, start_no=start_no)
             n_sheets += 1
 
     out_path = Path(out_path)

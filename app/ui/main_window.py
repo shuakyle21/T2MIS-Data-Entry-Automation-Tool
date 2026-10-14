@@ -41,7 +41,7 @@ STAGE_ENCODE = "Stage 1 — Encoding"
 STAGE_ENROLL = "Stage 2 — Enrollment"
 STAGE_ATTEND = "Stage 3 — Attendance"
 
-ATTEND_TEMPLATE = Path.cwd() / "ATTENDANCE SHEET (template).docx"
+ATTEND_TEMPLATE = Path(__file__).resolve().parents[2] / "ATTENDANCE SHEET (template).docx"
 WEEKDAY_LABELS = ["M", "T", "W", "Th", "F", "Sat", "Sun"]
 
 COLOR_PENDING = QColor("#ffffff")
