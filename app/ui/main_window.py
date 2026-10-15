@@ -6,17 +6,24 @@ from pathlib import Path
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDateEdit,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
+    QSplitter,
+    QStatusBar,
+    QStyle,
     QTableView,
     QTextEdit,
     QVBoxLayout,
@@ -34,6 +41,7 @@ from app.services.csv_loader import (
     row_learner_id,
     row_to_enroll_data,
 )
+from app.ui.styles import APP_QSS
 from app.workers.selenium_worker import SeleniumWorker
 
 STATUS_COL = "Status"
@@ -44,17 +52,33 @@ STAGE_ATTEND = "Stage 3 — Attendance"
 ATTEND_TEMPLATE = Path(__file__).resolve().parents[2] / "ATTENDANCE SHEET (template).docx"
 WEEKDAY_LABELS = ["M", "T", "W", "Th", "F", "Sat", "Sun"]
 
+STAGE_HINTS = {
+    STAGE_ENCODE: "Fill registration forms row by row. You review + submit in Chrome.",
+    STAGE_ENROLL: "Search learners by ID, click Enroll in Chrome, then Fill Form.",
+    STAGE_ATTEND: "Offline batch: generate attendance DOCX from an enrollees CSV.",
+}
+
 COLOR_PENDING = QColor("#ffffff")
-COLOR_FILLING = QColor("#cfe2ff")
-COLOR_DONE = QColor("#d4edda")
-COLOR_FAILED = QColor("#f8d7da")
+COLOR_FILLING = QColor("#dbeafe")
+COLOR_DONE = QColor("#dcfce7")
+COLOR_FAILED = QColor("#fee2e2")
+
+
+def _card() -> tuple[QFrame, QVBoxLayout]:
+    frame = QFrame()
+    frame.setObjectName("Card")
+    lay = QVBoxLayout(frame)
+    lay.setContentsMargins(14, 12, 14, 12)
+    lay.setSpacing(10)
+    return frame, lay
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("T2MIS Encoder")
-        self.resize(1100, 750)
+        self.resize(1140, 800)
+        self.setStyleSheet(APP_QSS)
 
         self._path = None
         self._fieldnames = []
@@ -63,7 +87,7 @@ class MainWindow(QMainWindow):
         self._idx_to_model_row = {}  # csv idx -> model row (preview only)
         self._status_col = 0
         self._worker = None
-        self._clear_awaiting()  # csv idx currently awaiting review
+        self._awaiting_idx = None
         self._awaiting_ok = False
         self._awaiting_phase = ""  # Stage 2 result phase: search | details
         self._awaiting_ready = False  # Stage 2 search produced a match
@@ -71,69 +95,187 @@ class MainWindow(QMainWindow):
         self._done_count = 0
 
         root = QWidget(self)
-        layout = QVBoxLayout(root)
+        root_lay = QVBoxLayout(root)
+        root_lay.setContentsMargins(16, 14, 16, 12)
+        root_lay.setSpacing(12)
 
-        # --- file row ---
-        file_row = QHBoxLayout()
+        # --- header ---
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        title_col = QVBoxLayout()
+        title_col.setSpacing(0)
+        title = QLabel("T2MIS Encoder")
+        title.setObjectName("AppTitle")
+        subtitle = QLabel("Assisted T2MIS data entry · fill-only, you submit")
+        subtitle.setObjectName("AppSubtitle")
+        title_col.addWidget(title)
+        title_col.addWidget(subtitle)
+        header.addLayout(title_col, 1)
+
+        header.addWidget(QLabel("Stage:"))
         self.stage_box = QComboBox()
         self.stage_box.addItems([STAGE_ENCODE, STAGE_ENROLL, STAGE_ATTEND])
+        self.stage_box.setMinimumWidth(210)
         self.stage_box.currentTextChanged.connect(self.on_stage_changed)
-        file_row.addWidget(self.stage_box)
+        header.addWidget(self.stage_box)
+        self.stage_hint = QLabel(STAGE_HINTS[STAGE_ENCODE])
+        self.stage_hint.setObjectName("AppSubtitle")
+        self.stage_hint.setWordWrap(True)
+        header.addWidget(self.stage_hint, 2)
+        root_lay.addLayout(header)
+
+        # --- file card ---
+        file_card, file_lay = _card()
+        file_row = QHBoxLayout()
+        file_row.setSpacing(8)
+        file_row.addWidget(QLabel("Schedule:"))
         self.sched_edit = QLineEdit(DEFAULT_SCHED_ID)
         self.sched_edit.setPlaceholderText("SchSchedId")
-        self.sched_edit.setMaximumWidth(140)
+        self.sched_edit.setMaximumWidth(150)
         self.sched_edit.setToolTip(
             "Default training schedule ID (per-row SchSchedId overrides this)."
         )
-        file_row.addWidget(QLabel("Schedule:"))
         file_row.addWidget(self.sched_edit)
-        self.open_btn = QPushButton("Open Masterlist CSV")
+        self.open_btn = QPushButton("  Open CSV")
+        self.open_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
+        self.open_btn.setShortcut("Ctrl+O")
+        self.open_btn.setToolTip("Open a CSV masterlist (Ctrl+O)")
         self.open_btn.clicked.connect(self.open_csv)
         file_row.addWidget(self.open_btn)
         self.file_label = QLabel("No file loaded.")
+        self.file_label.setObjectName("FilePath")
         self.file_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.file_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.file_label.setWordWrap(False)
+        self.file_label.setToolTip("Loaded CSV path")
         file_row.addWidget(self.file_label, 1)
         self.count_label = QLabel("")
+        self.count_label.setObjectName("CountBadge")
+        self.count_label.setVisible(False)
         file_row.addWidget(self.count_label)
-        layout.addLayout(file_row)
+        file_lay.addLayout(file_row)
+        root_lay.addWidget(file_card)
 
-        # --- preview table ---
-        layout.addWidget(QLabel("Preview (first 500 rows):"))
+        # --- main splitter: preview (top) + log (bottom) ---
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
+
+        # Preview card
+        preview_card, preview_lay = _card()
+        preview_head = QHBoxLayout()
+        preview_title = QLabel("PREVIEW · FIRST 500 ROWS")
+        preview_title.setObjectName("SectionTitle")
+        preview_head.addWidget(preview_title)
+        preview_head.addStretch(1)
+        self.preview_meta = QLabel("")
+        self.preview_meta.setObjectName("AppSubtitle")
+        preview_head.addWidget(self.preview_meta)
+        preview_lay.addLayout(preview_head)
+
         self.table = QTableView()
         self.table.setModel(self._model)
         self.table.setEditTriggers(QTableView.NoEditTriggers)
         self.table.setSelectionBehavior(QTableView.SelectRows)
-        layout.addWidget(self.table, 3)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(26)
+        self.table.horizontalHeader().setHighlightSections(False)
+        self.table.horizontalHeader().setSectionsMovable(False)
+        self.table.setWordWrap(False)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        preview_lay.addWidget(self.table)
+        splitter.addWidget(preview_card)
 
-        # --- run controls ---
+        # Log card
+        log_card, log_lay = _card()
+        log_head = QHBoxLayout()
+        log_title = QLabel("LOG")
+        log_title.setObjectName("SectionTitle")
+        log_head.addWidget(log_title)
+        log_head.addStretch(1)
+        self.clear_log_btn = QPushButton("Clear")
+        self.clear_log_btn.setFlat(False)
+        self.clear_log_btn.setMaximumWidth(90)
+        self.clear_log_btn.setToolTip("Clear the log view")
+        self.clear_log_btn.clicked.connect(lambda: self.log_view.clear())
+        log_head.addWidget(self.clear_log_btn)
+        log_lay.addLayout(log_head)
+        self.log_view = QTextEdit()
+        self.log_view.setObjectName("LogView")
+        self.log_view.setReadOnly(True)
+        self.log_view.setPlaceholderText("Run progress and automation messages appear here…")
+        log_lay.addWidget(self.log_view)
+        splitter.addWidget(log_card)
+
+        splitter.setStretchFactor(0, 5)
+        splitter.setStretchFactor(1, 2)
+        root_lay.addWidget(splitter, 1)
+
+        # --- action card ---
+        action_card, action_lay = _card()
+        self.current_label = QLabel("Idle — open a CSV to begin.")
+        self.current_label.setObjectName("StatusBanner")
+        self.current_label.setProperty("kind", "idle")
+        self.current_label.setWordWrap(True)
+        action_lay.addWidget(self.current_label)
+
         ctrl_row = QHBoxLayout()
-        self.start_btn = QPushButton("Start")
+        ctrl_row.setSpacing(8)
+        self.start_btn = QPushButton(" Start")
+        self.start_btn.setObjectName("PrimaryButton")
+        self.start_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.start_btn.setToolTip("Start the browser run (opens Chrome for T2MIS login)")
         self.start_btn.clicked.connect(self.start_run)
-        self.next_btn = QPushButton("Next (mark done)")
+
+        self.next_btn = QPushButton(" Next ✓")
+        self.next_btn.setObjectName("SuccessButton")
+        self.next_btn.setShortcut("Ctrl+Return")
+        self.next_btn.setToolTip("You submitted in Chrome — flag done and advance (Ctrl+Enter)")
         self.next_btn.clicked.connect(self.on_next)
-        self.fill_btn = QPushButton("Fill Form")
-        self.fill_btn.clicked.connect(self.on_fill)
+
+        self.fill_btn = QPushButton(" Fill Form")
+        self.fill_btn.setObjectName("PrimaryButton")
+        self.fill_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
         self.fill_btn.setToolTip(
             "Stage 2: after clicking Enroll in Chrome, autofill the details form."
         )
-        self.retry_btn = QPushButton("Retry")
+        self.fill_btn.clicked.connect(self.on_fill)
+
+        self.retry_btn = QPushButton(" Retry")
+        self.retry_btn.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.retry_btn.setToolTip("Retry the current row (F5)")
+        self.retry_btn.setShortcut("F5")
         self.retry_btn.clicked.connect(self.on_retry)
-        self.skip_btn = QPushButton("Skip")
+
+        self.skip_btn = QPushButton(" Skip")
+        self.skip_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaSkipForward))
+        self.skip_btn.setToolTip("Skip the current row without marking it done")
         self.skip_btn.clicked.connect(self.on_skip)
-        self.stop_btn = QPushButton("Stop")
+
+        self.stop_btn = QPushButton(" Stop")
+        self.stop_btn.setObjectName("DangerButton")
+        self.stop_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaStop))
+        self.stop_btn.setToolTip("Stop after the current step")
         self.stop_btn.clicked.connect(self.on_stop)
-        for b in (self.start_btn, self.next_btn, self.fill_btn, self.retry_btn, self.skip_btn, self.stop_btn):
+
+        for b in (self.start_btn, self.next_btn, self.fill_btn,
+                  self.retry_btn, self.skip_btn, self.stop_btn):
             ctrl_row.addWidget(b)
         self.progress = QProgressBar()
+        self.progress.setTextVisible(True)
+        self.progress.setFormat("%v / %m")
+        self.progress.setMinimumWidth(140)
         ctrl_row.addWidget(self.progress, 1)
-        layout.addLayout(ctrl_row)
-        self.current_label = QLabel("Idle.")
-        layout.addWidget(self.current_label)
+        action_lay.addLayout(ctrl_row)
+        root_lay.addWidget(action_card)
 
         # --- attendance panel (Stage 3, offline batch generation) ---
-        self.attend_panel = QWidget()
-        attend = QVBoxLayout(self.attend_panel)
-        attend.setContentsMargins(0, 0, 0, 0)
+        self.attend_panel, attend = _card()
+        attend_title = QLabel("ATTENDANCE SHEETS · OFFLINE")
+        attend_title.setObjectName("SectionTitle")
+        attend.addWidget(attend_title)
         type_row = QHBoxLayout()
         type_row.addWidget(QLabel("School:"))
         self.school_edit = QLineEdit()
@@ -171,22 +313,32 @@ class MainWindow(QMainWindow):
         attend.addLayout(date_row)
         prev_row = QHBoxLayout()
         self.attend_preview = QLabel("No file loaded.")
+        self.attend_preview.setObjectName("FilePath")
         prev_row.addWidget(self.attend_preview, 1)
-        self.generate_btn = QPushButton("Generate Attendance DOCX")
+        self.generate_btn = QPushButton(" Generate DOCX")
+        self.generate_btn.setObjectName("PrimaryButton")
+        self.generate_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
         self.generate_btn.clicked.connect(self.on_generate_attendance)
         prev_row.addWidget(self.generate_btn)
         attend.addLayout(prev_row)
-        layout.addWidget(self.attend_panel)
+        root_lay.addWidget(self.attend_panel)
         self.attend_panel.setVisible(False)
 
-        # --- log ---
-        layout.addWidget(QLabel("Log:"))
-        self.log_view = QTextEdit()
-        self.log_view.setReadOnly(True)
-        layout.addWidget(self.log_view, 2)
-
         self.setCentralWidget(root)
+
+        self.statusbar = QStatusBar()
+        self.statusbar.showMessage("Ready.")
+        self.setStatusBar(self.statusbar)
         self._refresh_buttons()
+
+    # ---------- status banner ----------
+    def _set_status(self, text, kind="idle"):
+        self.current_label.setText(text)
+        self.current_label.setProperty("kind", kind)
+        # Repolish so the [kind=...] selector reapplies.
+        self.current_label.style().unpolish(self.current_label)
+        self.current_label.style().polish(self.current_label)
+        self.statusbar.showMessage(text, 8000)
 
     # ---------- file handling ----------
     def _is_enroll(self):
@@ -200,18 +352,19 @@ class MainWindow(QMainWindow):
             return False
         return is_enrolled(row) if self._is_enroll() else is_done(row)
 
-    def on_stage_changed(self, _text):
+    def on_stage_changed(self, text):
         is_enroll = self._is_enroll()
         is_attend = self._is_attendance()
+        self.stage_hint.setText(STAGE_HINTS.get(text, ""))
         self.sched_edit.setEnabled(is_enroll and not is_attend)
         if is_attend:
-            self.open_btn.setText("Open Enrollees CSV")
+            self.open_btn.setText("  Open Enrollees CSV")
         else:
             self.open_btn.setText(
-                "Open Enrollees CSV" if is_enroll else "Open Masterlist CSV"
+                "  Open Enrollees CSV" if is_enroll else "  Open Masterlist CSV"
             )
         self.next_btn.setText(
-            "Next (mark enrolled)" if is_enroll else "Next (mark done)"
+            " Next ✓ (enrolled)" if is_enroll else " Next ✓ (done)"
         )
         # Loaded rows belong to the other stage; clear to avoid flag mixups.
         self._path = None
@@ -220,8 +373,10 @@ class MainWindow(QMainWindow):
         self._clear_awaiting()
         self._model.clear()
         self.file_label.setText("No file loaded.")
-        self.count_label.setText("")
+        self.count_label.setVisible(False)
+        self.preview_meta.setText("")
         self.attend_panel.setVisible(is_attend)
+        self._set_status("Idle — open a CSV to begin.", "idle")
         self._update_attendance_preview()
         self._refresh_buttons()
 
@@ -254,8 +409,10 @@ class MainWindow(QMainWindow):
         self._clear_awaiting()
         self._populate_preview()
         self.file_label.setText(path)
+        self.file_label.setToolTip(path)
         self._update_counts()
         self.log(f"Loaded {len(rows)} rows from {path}.")
+        self._set_status(f"Loaded {len(rows)} rows — press Start.", "ok")
         self._update_attendance_preview()
         self._refresh_buttons()
 
@@ -274,15 +431,26 @@ class MainWindow(QMainWindow):
                 else:
                     text = str(row.get(name, ""))
                 item = QStandardItem(text)
+                item.setEditable(False)
                 if name == STATUS_COL:
                     item.setBackground(COLOR_DONE if self._flag_done(row) else COLOR_PENDING)
                 self._model.setItem(model_row, col, item)
             self._idx_to_model_row[model_row] = model_row
         self.table.resizeColumnsToContents()
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setStretchLastSection(True)
+        shown = min(len(self._rows), 500)
+        self.preview_meta.setText(f"{shown} of {len(self._rows)} rows shown")
 
     def _update_counts(self):
         remaining = sum(1 for r in self._rows if not self._flag_done(r))
-        self.count_label.setText(f"{len(self._rows)} rows ({remaining} remaining)")
+        if self._rows:
+            self.count_label.setText(f"{len(self._rows)} rows · {remaining} remaining")
+            self.count_label.setVisible(True)
+        else:
+            self.count_label.setVisible(False)
 
     # ---------- run control ----------
     def start_run(self):
@@ -332,7 +500,7 @@ class MainWindow(QMainWindow):
         self._worker.log.connect(self.log)
         self._worker.finished.connect(self.on_finished)
         self._worker.start()
-        self.current_label.setText("Starting browser — log in to T2MIS when Chrome opens.")
+        self._set_status("Starting browser — log in to T2MIS when Chrome opens.", "working")
         self._refresh_buttons()
 
     def on_login_required(self):
@@ -343,7 +511,7 @@ class MainWindow(QMainWindow):
         box.exec()
         if self._worker is not None:
             self._worker.confirm_login()
-            self.current_label.setText("Logged in — filling rows.")
+            self._set_status("Logged in — filling rows.", "working")
 
     def on_schedule_required(self):
         box = QMessageBox(self)
@@ -357,7 +525,7 @@ class MainWindow(QMainWindow):
         box.exec()
         if self._worker is not None:
             self._worker.confirm_schedule()
-            self.current_label.setText("Schedule selected — searching learners.")
+            self._set_status("Schedule selected — searching learners.", "working")
 
     def on_row_started(self, idx):
         self._clear_awaiting()
@@ -372,7 +540,7 @@ class MainWindow(QMainWindow):
         else:
             name = f"{row.get('First Name', '')} {row.get('Last Name', '')}".strip()
             action = "Filling"
-        self.current_label.setText(f"{action} row {idx + 1}/{len(self._rows)}: {name} …")
+        self._set_status(f"{action} row {idx + 1}/{len(self._rows)}: {name} …", "working")
         self._paint_status(idx, "filling", COLOR_FILLING)
         self._refresh_buttons()
 
@@ -385,23 +553,27 @@ class MainWindow(QMainWindow):
         self.table.scrollTo(self._model.index(self._idx_to_model_row.get(idx, 0), 0))
         if self._is_enroll():
             if self._awaiting_phase == "details":
-                self.current_label.setText(
+                self._set_status(
                     f"Row {idx + 1} details filled — review + click Create "
-                    f"in Chrome, then press Next."
+                    f"in Chrome, then press Next.",
+                    "review",
                 )
             elif not result.get("enroll_ready"):
                 self._paint_status(idx, "no match", COLOR_FAILED)
-                self.current_label.setText(
-                    f"Row {idx + 1}: no learner match — check ID, Retry, or Skip."
+                self._set_status(
+                    f"Row {idx + 1}: no learner match — check ID, Retry, or Skip.",
+                    "error",
                 )
             else:
-                self.current_label.setText(
+                self._set_status(
                     f"Row {idx + 1} found — verify + click Enroll in Chrome, "
-                    f"then press Fill Form."
+                    f"then press Fill Form.",
+                    "review",
                 )
         else:
-            self.current_label.setText(
-                f"Row {idx + 1} filled — review + submit in Chrome, then press Next."
+            self._set_status(
+                f"Row {idx + 1} filled — review + submit in Chrome, then press Next.",
+                "review",
             )
         self._refresh_buttons()
 
@@ -409,7 +581,7 @@ class MainWindow(QMainWindow):
         self._awaiting_idx = idx
         self._awaiting_ok = False
         self._paint_status(idx, "failed", COLOR_FAILED)
-        self.current_label.setText(f"Row {idx + 1} failed: {error} — Retry, Skip, or Stop.")
+        self._set_status(f"Row {idx + 1} failed: {error} — Retry, Skip, or Stop.", "error")
         self._refresh_buttons()
 
     def on_next(self):
@@ -433,7 +605,7 @@ class MainWindow(QMainWindow):
         self.log(f"Flagged row {idx + 1} {'Enrolled' if is_enroll else 'Done'}.")
         self._clear_awaiting()
         self._worker.confirm_next()
-        self.current_label.setText("Advancing …")
+        self._set_status("Advancing …", "working")
         self._refresh_buttons()
 
     def on_retry(self):
@@ -447,8 +619,7 @@ class MainWindow(QMainWindow):
 
     def _clear_awaiting(self):
         self._awaiting_idx = None
-        self._awaiting_phase = ""
-        self._awaiting_ready = False
+        self._awaiting_ok = False
         self._awaiting_phase = ""
         self._awaiting_ready = False
 
@@ -459,7 +630,7 @@ class MainWindow(QMainWindow):
         self.log(f"Filling details form for row {self._awaiting_idx + 1} …")
         self._clear_awaiting()
         self._worker.confirm_fill()
-        self.current_label.setText("Filling details form …")
+        self._set_status("Filling details form …", "working")
         self._refresh_buttons()
 
     def on_skip(self):
@@ -470,21 +641,21 @@ class MainWindow(QMainWindow):
         self._paint_status(idx, "queued", COLOR_PENDING)
         self._clear_awaiting()
         self._worker.skip_row()
-        self.current_label.setText("Advancing …")
+        self._set_status("Advancing …", "working")
         self._refresh_buttons()
 
     def on_stop(self):
         if self._worker is not None and self._worker.isRunning():
             self.log("Stopping after current step …")
             self._worker.request_stop()
-            self.current_label.setText("Stopping …")
+            self._set_status("Stopping …", "idle")
 
     def on_finished(self, summary):
         self.log(
             f"Finished: {summary.get('ok', 0)} filled, {summary.get('failed', 0)} failed"
             + (" (stopped)" if summary.get("stopped") else "")
         )
-        self.current_label.setText("Idle.")
+        self._set_status("Idle — run finished.", "ok")
         self._clear_awaiting()
         if self._worker is not None:
             self._worker.deleteLater()
@@ -503,6 +674,8 @@ class MainWindow(QMainWindow):
 
     def log(self, message):
         self.log_view.append(message)
+        bar = self.log_view.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     def _running(self):
         return self._worker is not None and self._worker.isRunning()
@@ -523,11 +696,14 @@ class MainWindow(QMainWindow):
         self.sched_edit.setEnabled(not running and self._is_enroll() and not is_attend)
         self.open_btn.setEnabled(not running)
         self.start_btn.setEnabled(not running and has_pending and not is_attend)
+        self.fill_btn.setVisible(self._is_enroll())
         self.next_btn.setEnabled(bool(awaiting and self._awaiting_ok and not is_attend))
         self.fill_btn.setEnabled(bool(can_fill))
         self.retry_btn.setEnabled(bool(awaiting and not is_attend))
         self.skip_btn.setEnabled(bool(awaiting and not is_attend))
         self.stop_btn.setEnabled(running)
+        # Guide the operator toward the next action.
+        self.next_btn.setDefault(bool(self.next_btn.isEnabled()))
         if is_attend:
             self._update_attendance_preview()
 

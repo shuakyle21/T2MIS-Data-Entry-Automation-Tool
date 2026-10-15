@@ -11,6 +11,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("T2MIS Encoder")
     app.setOrganizationName("T2MIS Encoder")
+    app.setStyle("Fusion")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
