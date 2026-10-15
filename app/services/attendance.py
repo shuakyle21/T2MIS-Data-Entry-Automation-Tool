@@ -1,6 +1,6 @@
 """Attendance sheet batch generator (Stage 3, offline, Qt-free).
 
-Fills `ATTENDANCE SHEET (template).docx` from the enrollees/masterlist CSV:
+Fills `attendance_template.docx` from the enrollees/masterlist CSV:
 - Names come from Last Name / First Name / Middle Name (MI = initial).
 - One sheet holds CAPACITY students; overflow creates continuation pages.
 - One page per date; output is a single DOCX with page breaks between days.
