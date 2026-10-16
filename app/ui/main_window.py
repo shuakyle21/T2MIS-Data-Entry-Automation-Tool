@@ -3,7 +3,7 @@
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, Qt, QTimer
 from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -78,6 +78,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("T2MIS Encoder")
         self.resize(1140, 800)
+        self.setMinimumSize(820, 600)
         self.setStyleSheet(APP_QSS)
 
         self._path = None
@@ -121,6 +122,8 @@ class MainWindow(QMainWindow):
         self.stage_hint = QLabel(STAGE_HINTS[STAGE_ENCODE])
         self.stage_hint.setObjectName("AppSubtitle")
         self.stage_hint.setWordWrap(True)
+        self.stage_hint.setMinimumWidth(0)
+        self.stage_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         header.addWidget(self.stage_hint, 2)
         root_lay.addLayout(header)
 
@@ -146,6 +149,7 @@ class MainWindow(QMainWindow):
         self.file_label.setObjectName("FilePath")
         self.file_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.file_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.file_label.setMinimumWidth(0)
         self.file_label.setWordWrap(False)
         self.file_label.setToolTip("Loaded CSV path")
         file_row.addWidget(self.file_label, 1)
@@ -159,9 +163,12 @@ class MainWindow(QMainWindow):
         # --- main splitter: preview (top) + log (bottom) ---
         splitter = QSplitter(Qt.Vertical)
         splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(4)
+        splitter.setOpaqueResize(True)
 
         # Preview card
         preview_card, preview_lay = _card()
+        preview_card.setMinimumHeight(220)
         preview_head = QHBoxLayout()
         preview_title = QLabel("PREVIEW · FIRST 500 ROWS")
         preview_title.setObjectName("SectionTitle")
@@ -185,11 +192,14 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionsMovable(False)
         self.table.setWordWrap(False)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.horizontalHeader().setMinimumSectionSize(60)
+        self.table.horizontalHeader().setStretchLastSection(True)
         preview_lay.addWidget(self.table)
         splitter.addWidget(preview_card)
 
         # Log card
         log_card, log_lay = _card()
+        log_card.setMinimumHeight(120)
         log_head = QHBoxLayout()
         log_title = QLabel("LOG")
         log_title.setObjectName("SectionTitle")
@@ -205,12 +215,16 @@ class MainWindow(QMainWindow):
         self.log_view = QTextEdit()
         self.log_view.setObjectName("LogView")
         self.log_view.setReadOnly(True)
+        self.log_view.setMinimumHeight(80)
+        self.log_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.log_view.setPlaceholderText("Run progress and automation messages appear here…")
         log_lay.addWidget(self.log_view)
         splitter.addWidget(log_card)
 
         splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 2)
+        self._splitter = splitter
+        QTimer.singleShot(0, lambda: splitter.setSizes([520, 180]))
         root_lay.addWidget(splitter, 1)
 
         # --- action card ---
@@ -262,13 +276,21 @@ class MainWindow(QMainWindow):
 
         for b in (self.start_btn, self.next_btn, self.fill_btn,
                   self.retry_btn, self.skip_btn, self.stop_btn):
+            b.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             ctrl_row.addWidget(b)
+        ctrl_row.addStretch(1)
+        action_lay.addLayout(ctrl_row)
+
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(8)
         self.progress = QProgressBar()
         self.progress.setTextVisible(True)
         self.progress.setFormat("%v / %m")
-        self.progress.setMinimumWidth(140)
-        ctrl_row.addWidget(self.progress, 1)
-        action_lay.addLayout(ctrl_row)
+        self.progress.setMinimumWidth(0)
+        self.progress.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.progress.setMinimumHeight(16)
+        progress_row.addWidget(self.progress, 1)
+        action_lay.addLayout(progress_row)
         root_lay.addWidget(action_card)
 
         # --- attendance panel (Stage 3, offline batch generation) ---
@@ -306,6 +328,7 @@ class MainWindow(QMainWindow):
         for label in WEEKDAY_LABELS:
             cb = QCheckBox(label)
             cb.setChecked(True)
+            cb.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             cb.stateChanged.connect(lambda _s: self._update_attendance_preview())
             self.day_checks.append(cb)
             date_row.addWidget(cb)
@@ -314,6 +337,8 @@ class MainWindow(QMainWindow):
         prev_row = QHBoxLayout()
         self.attend_preview = QLabel("No file loaded.")
         self.attend_preview.setObjectName("FilePath")
+        self.attend_preview.setMinimumWidth(0)
+        self.attend_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         prev_row.addWidget(self.attend_preview, 1)
         self.generate_btn = QPushButton(" Generate DOCX")
         self.generate_btn.setObjectName("PrimaryButton")
@@ -436,9 +461,11 @@ class MainWindow(QMainWindow):
                     item.setBackground(COLOR_DONE if self._flag_done(row) else COLOR_PENDING)
                 self._model.setItem(model_row, col, item)
             self._idx_to_model_row[model_row] = model_row
+        # Size once for content, then stay Interactive so window/splitter
+        # resizes don't re-measure 500 rows (resize lag / freeze).
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeToContents
+            QHeaderView.Interactive
         )
         self.table.horizontalHeader().setStretchLastSection(True)
         shown = min(len(self._rows), 500)
